@@ -9,8 +9,10 @@
  * to maintain backwards compatibility.
  */
 
-import { Request, Response, NextFunction } from 'express';
-import rateLimit from 'express-rate-limit';
+ import { Request, Response, NextFunction } from 'express';
+ import { createRequire } from 'module';
+ // Lazily require express-rate-limit only when enabled (avoids hard crash if not installed)
+ const requireModule = createRequire(import.meta.url);
 import cors from 'cors';
 import config from '../config.js';
 import { Logger } from '../logger.js';
@@ -100,6 +102,20 @@ export function createOriginValidationMiddleware() {
  */
 export function createRateLimitMiddleware() {
   if (!config.enableRateLimit) {
+    return (_req: Request, _res: Response, next: NextFunction) => next();
+  }
+
+  // Try to load express-rate-limit only when rate limiting is enabled
+  let rateLimit: any;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    rateLimit = requireModule('express-rate-limit');
+    // Some bundlers place the function at .default
+    rateLimit = rateLimit?.default ?? rateLimit;
+  } catch (err) {
+    logger.error('ENABLE_RATE_LIMIT is true, but express-rate-limit is not installed. Proceeding without rate limiting.', {
+      error: (err as Error).message,
+    });
     return (_req: Request, _res: Response, next: NextFunction) => next();
   }
 
