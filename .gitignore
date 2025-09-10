@@ -39,6 +39,9 @@ Thumbs.db
 .specstory
 checklist.md
 
+# Local Docker files (example is tracked)
+docker-compose.yml
+
 # Temporary files
 .tmp/
 .temp/

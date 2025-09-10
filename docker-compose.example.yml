@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  clickup-mcp:
+    # Build from the local Dockerfile
+    build: .
+    container_name: clickup-mcp
+
+    # Load environment variables from a local .env file (not committed)
+    env_file:
+      - .env
+
+    # Expose the MCP HTTP server. Keep this in sync with PORT in .env
+    ports:
+      - "8080:8080"   # HTTP Streamable endpoint at /mcp, SSE at /sse when ENABLE_SSE=true
+
+    # Restart policy suitable for dev/prod
+    restart: unless-stopped
+
+    # Optional networks
+    # networks:
+    #   - shared_n8n
+
+# Example of attaching to an external network (uncomment both sections if you need it)
+# networks:
+#   shared_n8n:
+#     external: true
+#     name: n8n-ai-local_shared_n8n_network

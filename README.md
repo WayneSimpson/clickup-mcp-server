@@ -174,6 +174,39 @@ npx @taazkareem/clickup-mcp-server@latest --env CLICKUP_API_KEY=your-key --env C
 
 For detailed security configuration, see [Security Features Documentation](docs/security-features.md).
 
+## Docker Compose
+
+A production-friendly, local-first Docker Compose example is provided as `docker-compose.example.yml`.
+We intentionally `.gitignore` the local `docker-compose.yml` so you can customize it without committing
+environment-specific settings. To get started:
+
+```bash
+# Copy the example and customize as needed
+cp docker-compose.example.yml docker-compose.yml
+
+# Create and populate your .env (not committed)
+# Required variables at minimum:
+# CLICKUP_API_KEY=your-api-key
+# CLICKUP_TEAM_ID=your-team-id
+# Optional:
+# ENABLE_SSE=true
+# PORT=8080
+
+# Build and start
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+```
+
+Default Compose mapping exposes the container on `http://localhost:8080`:
+
+- Streamable HTTP: `http://localhost:8080/mcp`
+- Legacy SSE: `http://localhost:8080/sse` (when `ENABLE_SSE=true`)
+
+If you need to attach to an external network (e.g. with n8n), uncomment the example network
+section at the bottom of `docker-compose.example.yml` and ensure that the network exists.
+
 #### n8n Integration
 
 To integrate with n8n:
