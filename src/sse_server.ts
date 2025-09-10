@@ -53,6 +53,31 @@ export function startSSEServer() {
   app.use(createOriginValidationMiddleware());
   app.use(createRateLimitMiddleware());
 
+  // Normalize Accept header for MCP endpoints to satisfy MCP Streamable HTTP spec
+  // The POST /mcp request MUST include both application/json and text/event-stream
+  // We defensively add them if clients/proxies omit one
+  app.use((req, _res, next) => {
+    if (req.path === '/mcp') {
+      const original = (req.headers['accept'] || '').toString();
+      const parts = original.split(',').map(s => s.trim()).filter(Boolean);
+      let changed = false;
+      if (!parts.some(p => p.includes('application/json'))) {
+        parts.push('application/json');
+        changed = true;
+      }
+      if (!parts.some(p => p.includes('text/event-stream'))) {
+        parts.push('text/event-stream');
+        changed = true;
+      }
+      if (changed) {
+        const updated = Array.from(new Set(parts)).join(', ');
+        (req.headers as any)['accept'] = updated;
+        logger.debug('Normalized Accept header for /mcp', { original, updated });
+      }
+    }
+    next();
+  });
+
   // Configure JSON parsing with configurable size limit
   app.use(express.json({
     limit: configuration.maxRequestSize,
@@ -81,14 +106,19 @@ export function startSSEServer() {
       });
       let transport: StreamableHTTPServerTransport;
 
+      // Do not set or flush headers here. The transport will manage
+      // headers and response mode (JSON streaming without SSE framing)
+      // based on its configuration.
+
       if (sessionId && transports.streamable[sessionId]) {
         transport = transports.streamable[sessionId];
-      } else if (!sessionId && isInitializeRequest(req.body)) {
+      } else if (!sessionId) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => `session_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`,
           onsessioninitialized: (sessionId) => {
             transports.streamable[sessionId] = transport;
-          }
+          },
+          // Use default SSE streaming for responses as required by Streamable HTTP spec
         });
 
         transport.onclose = () => {
@@ -110,6 +140,9 @@ export function startSSEServer() {
         return;
       }
 
+      // Always pass parsed body from express.json(). The transport is designed
+      // to accept a pre-parsed body when provided; otherwise the raw stream would
+      // have been consumed by express.json() already.
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
       console.error('Error handling MCP request:', error);
@@ -129,7 +162,14 @@ export function startSSEServer() {
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!sessionId || !transports.streamable[sessionId]) {
-      res.status(400).send('Invalid or missing session ID');
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'Bad Request: Mcp-Session-Id header is required'
+        },
+        id: null,
+      });
       return;
     }
 
@@ -137,8 +177,11 @@ export function startSSEServer() {
     await transport.handleRequest(req, res);
   };
 
+  // Streamable HTTP notifications (requires mcp-session-id header)
+  // If missing or invalid, return 400 (client must POST initialize first)
   app.get('/mcp', handleSessionRequest);
 
+  // Keep DELETE for potential session termination if used by clients.
   app.delete('/mcp', handleSessionRequest);
 
   // Legacy SSE endpoints (for backwards compatibility)

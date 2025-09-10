@@ -94,6 +94,8 @@ import {
 
 import { Logger } from "./logger.js";
 import { clickUpServices } from "./services/shared.js";
+import { searchTool, handleSearch } from "./tools/search.js";
+import { fetchTool, handleFetch } from "./tools/fetch.js";
 
 // Create a logger instance for server
 const logger = new Logger('Server');
@@ -168,6 +170,8 @@ export function configureServer() {
     logger.debug("Received ListTools request");
     return {
       tools: [
+        searchTool,
+        fetchTool,
         workspaceHierarchyTool,
         createTaskTool,
         getTaskTool,
@@ -244,6 +248,10 @@ export function configureServer() {
     try {
       // Handle tool calls by routing to the appropriate handler
       switch (name) {
+        case "fetch":
+          return handleFetch(params);
+        case "search":
+          return handleSearch(params);
         case "get_workspace_hierarchy":
           return handleGetWorkspaceHierarchy();
         case "create_task":
