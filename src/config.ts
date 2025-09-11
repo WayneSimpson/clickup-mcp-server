@@ -37,6 +37,9 @@ for (let i = 0; i < args.length; i++) {
     if (key === 'ENABLE_SSE') envArgs.enableSSE = value;
     if (key === 'SSE_PORT') envArgs.ssePort = value;
     if (key === 'ENABLE_STDIO') envArgs.enableStdio = value;
+    if (key === 'DISABLE_SESSION') envArgs.disableSession = value;
+    if (key === 'ENABLE_JSON_RESPONSE') envArgs.enableJsonResponse = value;
+    if (key === 'OPENAI_TOOL_INDEX_FALLBACK') envArgs.openAiToolIndexFallback = value;
     if (key === 'PORT') envArgs.port = value;
     i++;
   }
@@ -80,6 +83,10 @@ interface Config {
   ssePort: number;
   enableStdio: boolean;
   port?: string;
+  // HTTP response mode for Streamable HTTP
+  enableJsonResponse: boolean;
+  disableSession: boolean;
+  openAiToolIndexFallback: boolean;
   // Security configuration (opt-in for backwards compatibility)
   enableSecurityFeatures: boolean;
   enableOriginValidation: boolean;
@@ -133,6 +140,9 @@ const configuration: Config = {
   ssePort: parseInteger(envArgs.ssePort || process.env.SSE_PORT, 3000),
   enableStdio: parseBoolean(envArgs.enableStdio || process.env.ENABLE_STDIO, true),
   port: envArgs.port || process.env.PORT || '3231',
+  enableJsonResponse: parseBoolean(envArgs.enableJsonResponse || process.env.ENABLE_JSON_RESPONSE, false),
+  disableSession: parseBoolean(envArgs.disableSession || process.env.DISABLE_SESSION, false),
+  openAiToolIndexFallback: parseBoolean(envArgs.openAiToolIndexFallback || process.env.OPENAI_TOOL_INDEX_FALLBACK, true),
   // Security configuration (opt-in for backwards compatibility)
   enableSecurityFeatures: parseBoolean(process.env.ENABLE_SECURITY_FEATURES, false),
   enableOriginValidation: parseBoolean(process.env.ENABLE_ORIGIN_VALIDATION, false),

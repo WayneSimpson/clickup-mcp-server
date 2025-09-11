@@ -8,6 +8,8 @@ A Model Context Protocol (MCP) server for integrating ClickUp tasks with AI appl
 
 > 🚧 **Status Update:** Working with the ClickUp team... ✨
 
+> Using in ChatGPT? See `docs/chatgpt-connector.md` for Data Source vs Tool modes, retrieval adapters (search/fetch), transports, configuration examples, and troubleshooting.
+
 ## Requirements
 
 - **Node.js v18.0.0 or higher** (required for MCP SDK compatibility)

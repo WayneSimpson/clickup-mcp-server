@@ -160,6 +160,71 @@ export function startSSEServer() {
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
+    // Proxy-aware fallback: if upstream rewrote '/mcp/search' or '/mcp/fetch' to '/mcp',
+    // detect it via common headers and serve REST responses instead of SSE
+    try {
+      const forwardedUri = (
+        (req.headers['x-original-uri'] || req.headers['x-rewrite-url'] || req.headers['x-forwarded-uri'] || req.headers['x-forwarded-url']) as string | undefined
+      )?.toString();
+      const effectivePath = forwardedUri || req.originalUrl || req.url || req.path;
+      if (effectivePath && (effectivePath.endsWith('/mcp/search') || effectivePath.includes('/mcp/search'))) {
+        const query = (req.query.q || req.query.query || '').toString();
+        const limit = Math.min(parseInt((req.query.limit as string) || '10') || 10, 50);
+        const { handleSearch } = await import('./tools/search.js');
+        if (!query.trim()) {
+          const { toolCatalog } = await import('./tools/catalog.js');
+          const items = toolCatalog.slice(0, limit).map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+            url: item.url,
+            snippet: item.description,
+            source_url: item.url,
+            metadata: { name: item.name, category: 'tool' }
+          }));
+          res.json({ results: items });
+          return;
+        }
+        const result = await handleSearch({ query, limit });
+        if ('results' in result && Array.isArray((result as any).results)) {
+          res.json({
+            results: (result as any).results.map((item: any) => ({
+              id: item.id,
+              title: item.title,
+              text: item.text || item.snippet || item.description || '',
+              url: item.url || '',
+              snippet: item.snippet || item.description || '',
+              source_url: item.url || '',
+              metadata: { status: item.status, list: item.list, category: item.category }
+            }))
+          });
+        } else {
+          res.json({ results: [] });
+        }
+        return;
+      }
+      if (effectivePath && (effectivePath.endsWith('/mcp/fetch') || effectivePath.includes('/mcp/fetch'))) {
+        const id = req.query.id as string;
+        if (!id) {
+          res.status(400).json({ error: 'Missing required parameter: id' });
+          return;
+        }
+        const { handleFetch } = await import('./tools/fetch.js');
+        const result = await handleFetch({ id });
+        if ('id' in result && 'text' in result) {
+          res.json({
+            id: (result as any).id,
+            content: (result as any).text || '',
+            metadata: { title: (result as any).title || '', url: (result as any).url || '', ...((result as any).metadata || {}) }
+          });
+        } else {
+          res.status(404).json({ error: 'Document not found' });
+        }
+        return;
+      }
+    } catch (e) {
+      // Non-fatal: fall through to normal SSE handling
+    }
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!sessionId || !transports.streamable[sessionId]) {
       res.status(400).json({
@@ -212,6 +277,308 @@ export function startSSEServer() {
     }
   });
 
+  // ChatGPT Custom Connector REST API endpoints for retrievable indexing
+  // These are separate from MCP tool calls and return direct JSON responses
+  app.get('/search', async (req, res) => {
+    try {
+      const query = (req.query.q || req.query.query || '').toString();
+      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      
+      // Import search handler dynamically to avoid circular dependencies
+      const { handleSearch } = await import('./tools/search.js');
+      // If query is empty, synthesize results from tool catalog so index is never empty
+      if (!query.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const items = toolCatalog.slice(0, limit).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          url: item.url,
+          // Back-compat fields some clients look for
+          snippet: item.description,
+          source_url: item.url,
+          metadata: { name: item.name, category: 'tool' }
+        }));
+        res.json({ results: items });
+        return;
+      }
+      const result = await handleSearch({ query, limit });
+      
+      // Check if result has the expected structure (success case)
+      if ('results' in result && Array.isArray(result.results)) {
+        const chatgptResponse = {
+          results: result.results.map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            // Provide both text and snippet for maximum compatibility
+            text: item.text || item.snippet || item.description || '',
+            url: item.url || '',
+            snippet: item.snippet || item.description || '',
+            source_url: item.url || '',
+            metadata: {
+              status: item.status,
+              list: item.list,
+              category: item.category
+            }
+          }))
+        };
+        res.json(chatgptResponse);
+      } else {
+        // Error case - return empty results
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('REST search endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/search', async (req, res) => {
+    try {
+      const { query = '', limit = 10 } = req.body || {};
+      
+      const { handleSearch } = await import('./tools/search.js');
+      const q = query.toString();
+      const lim = Math.min(limit, 50);
+      if (!q.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const items = toolCatalog.slice(0, lim).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          url: item.url,
+          snippet: item.description,
+          source_url: item.url,
+          metadata: { name: item.name, category: 'tool' }
+        }));
+        res.json({ results: items });
+        return;
+      }
+      const result = await handleSearch({ query: q, limit: lim });
+      
+      if ('results' in result && Array.isArray(result.results)) {
+        const chatgptResponse = {
+          results: result.results.map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: item.text || item.snippet || item.description || '',
+            url: item.url || '',
+            snippet: item.snippet || item.description || '',
+            source_url: item.url || '',
+            metadata: {
+              status: item.status,
+              list: item.list,
+              category: item.category
+            }
+          }))
+        };
+        res.json(chatgptResponse);
+      } else {
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('REST search endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/fetch', async (req, res) => {
+    try {
+      const id = req.query.id as string;
+      if (!id) {
+        res.status(400).json({ error: 'Missing required parameter: id' });
+        return;
+      }
+      
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      
+      // Check if result has the expected structure (success case)
+      if ('id' in result && 'text' in result) {
+        const chatgptResponse = {
+          id: result.id,
+          content: result.text || '',
+          metadata: {
+            title: result.title || '',
+            url: result.url || '',
+            ...(result.metadata || {})
+          }
+        };
+        res.json(chatgptResponse);
+      } else {
+        res.status(404).json({ error: 'Document not found' });
+      }
+    } catch (error: any) {
+      logger.error('REST fetch endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/fetch', async (req, res) => {
+    try {
+      const { id } = req.body || {};
+      if (!id) {
+        res.status(400).json({ error: 'Missing required parameter: id' });
+        return;
+      }
+      
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      
+      if ('id' in result && 'text' in result) {
+        const chatgptResponse = {
+          id: result.id,
+          content: result.text || '',
+          metadata: {
+            title: result.title || '',
+            url: result.url || '',
+            ...(result.metadata || {})
+          }
+        };
+        res.json(chatgptResponse);
+      } else {
+        res.status(404).json({ error: 'Document not found' });
+      }
+    } catch (error: any) {
+      logger.error('REST fetch endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // --- Aliases under /mcp for ChatGPT connectors using base /mcp ---
+  // Search aliases
+  app.get('/mcp/search', async (req, res) => {
+    try {
+      const query = (req.query.q || req.query.query || '').toString();
+      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      const { handleSearch } = await import('./tools/search.js');
+      if (!query.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const items = toolCatalog.slice(0, limit).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          url: item.url,
+          snippet: item.description,
+          source_url: item.url,
+          metadata: { name: item.name, category: 'tool' }
+        }));
+        res.json({ results: items });
+        return;
+      }
+      const result = await handleSearch({ query, limit });
+      if ('results' in result && Array.isArray(result.results)) {
+        res.json({
+          results: result.results.map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: item.text || item.snippet || item.description || '',
+            url: item.url || '',
+            snippet: item.snippet || item.description || '',
+            source_url: item.url || '',
+            metadata: { status: item.status, list: item.list, category: item.category }
+          }))
+        });
+      } else {
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('REST /mcp/search endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/mcp/search', async (req, res) => {
+    try {
+      const { query = '', limit = 10 } = req.body || {};
+      const q = query.toString();
+      const lim = Math.min(limit, 50);
+      const { handleSearch } = await import('./tools/search.js');
+      if (!q.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const items = toolCatalog.slice(0, lim).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          url: item.url,
+          snippet: item.description,
+          source_url: item.url,
+          metadata: { name: item.name, category: 'tool' }
+        }));
+        res.json({ results: items });
+        return;
+      }
+      const result = await handleSearch({ query: q, limit: lim });
+      if ('results' in result && Array.isArray(result.results)) {
+        res.json({
+          results: result.results.map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: item.text || item.snippet || item.description || '',
+            url: item.url || '',
+            snippet: item.snippet || item.description || '',
+            source_url: item.url || '',
+            metadata: { status: item.status, list: item.list, category: item.category }
+          }))
+        });
+      } else {
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('REST /mcp/search endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // Fetch aliases
+  app.get('/mcp/fetch', async (req, res) => {
+    try {
+      const id = req.query.id as string;
+      if (!id) {
+        res.status(400).json({ error: 'Missing required parameter: id' });
+        return;
+      }
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      if ('id' in result && 'text' in result) {
+        res.json({
+          id: result.id,
+          content: result.text || '',
+          metadata: { title: result.title || '', url: result.url || '', ...(result.metadata || {}) }
+        });
+      } else {
+        res.status(404).json({ error: 'Document not found' });
+      }
+    } catch (error: any) {
+      logger.error('REST /mcp/fetch endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/mcp/fetch', async (req, res) => {
+    try {
+      const { id } = req.body || {};
+      if (!id) {
+        res.status(400).json({ error: 'Missing required parameter: id' });
+        return;
+      }
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      if ('id' in result && 'text' in result) {
+        res.json({
+          id: result.id,
+          content: result.text || '',
+          metadata: { title: result.title || '', url: result.url || '', ...(result.metadata || {}) }
+        });
+      } else {
+        res.status(404).json({ error: 'Document not found' });
+      }
+    } catch (error: any) {
+      logger.error('REST /mcp/fetch endpoint error', { error: error?.message });
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // Health check endpoint
   app.get('/health', (req, res) => {
     res.json({
@@ -224,6 +591,344 @@ export function startSSEServer() {
         rateLimit: configuration.enableRateLimit,
         cors: configuration.enableCors
       }
+    });
+  });
+
+  // OpenAPI schema describing REST retrieval endpoints for ChatGPT indexing
+  const openapi = {
+    openapi: '3.0.3',
+    info: {
+      title: 'ClickUp MCP Retrieval API',
+      version: '1.0.0',
+      description: 'Search and fetch endpoints for ChatGPT Custom Connector retrievable indexing.'
+    },
+    servers: [
+      { url: 'https://clickup.nocodehome.co.uk' }
+    ],
+    paths: {
+      '/search': {
+        get: {
+          summary: 'Search documents',
+          parameters: [
+            { name: 'query', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 10 } }
+          ],
+          responses: {
+            '200': {
+              description: 'Search results',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SearchResponse' } } }
+            }
+          }
+        },
+        post: {
+          summary: 'Search documents',
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/SearchRequest' } } }
+          },
+          responses: {
+            '200': {
+              description: 'Search results',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SearchResponse' } } }
+            }
+          }
+        }
+      },
+      '/fetch': {
+        get: {
+          summary: 'Fetch a single document by ID',
+          parameters: [ { name: 'id', in: 'query', required: true, schema: { type: 'string' } } ],
+          responses: {
+            '200': {
+              description: 'Document',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/FetchResponse' } } }
+            }
+          }
+        },
+        post: {
+          summary: 'Fetch a single document by ID',
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/FetchRequest' } } }
+          },
+          responses: {
+            '200': {
+              description: 'Document',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/FetchResponse' } } }
+            }
+          }
+        }
+      },
+      '/mcp/search': { $ref: '#/paths/~1search' },
+      '/mcp/fetch': { $ref: '#/paths/~1fetch' }
+    },
+    components: {
+      schemas: {
+        SearchRequest: {
+          type: 'object',
+          properties: { query: { type: 'string' }, limit: { type: 'integer', default: 10 } }
+        },
+        SearchResultItem: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            text: { type: 'string' },
+            snippet: { type: 'string' },
+            url: { type: 'string' },
+            source_url: { type: 'string' },
+            metadata: { type: 'object', additionalProperties: true }
+          },
+          required: ['id', 'title']
+        },
+        SearchResponse: { type: 'object', properties: { results: { type: 'array', items: { $ref: '#/components/schemas/SearchResultItem' } } } },
+        FetchRequest: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+        FetchResponse: { type: 'object', properties: { id: { type: 'string' }, content: { type: 'string' }, metadata: { type: 'object', additionalProperties: true } }, required: ['id', 'content'] }
+      }
+    }
+  } as const;
+
+  app.get('/openapi.json', (_req, res) => {
+    res.json(openapi);
+  });
+  app.get('/mcp/openapi.json', (_req, res) => {
+    res.json(openapi);
+  });
+
+  // ===== DEDICATED CHATGPT DEEP RESEARCH CONNECTOR ENDPOINTS =====
+  // ChatGPT Custom Connectors expect plain REST, NOT MCP protocol
+  // These endpoints are completely separate from MCP handlers
+  
+  app.get('/chatgpt/search', async (req, res) => {
+    try {
+      const query = (req.query.query || req.query.q || '').toString();
+      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      
+      logger.info('ChatGPT search request', { query, limit });
+      
+      const { handleSearch } = await import('./tools/search.js');
+      
+      // Always return results, even for empty query
+      if (!query.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const results = toolCatalog.slice(0, limit).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          snippet: item.description,
+          url: item.url,
+          metadata: { 
+            name: item.name, 
+            category: 'tool',
+            source: 'tool_catalog'
+          }
+        }));
+        
+        logger.info('ChatGPT search response (empty query)', { count: results.length });
+        res.json({ results });
+        return;
+      }
+      
+      const searchResult = await handleSearch({ query, limit });
+      
+      if ('results' in searchResult && Array.isArray(searchResult.results)) {
+        const results = searchResult.results.map((item: any) => ({
+          id: item.id || '',
+          title: item.title || '',
+          text: item.text || item.snippet || item.description || '',
+          snippet: item.snippet || item.description || '',
+          url: item.url || '',
+          metadata: {
+            status: item.status,
+            list: item.list,
+            category: item.category || 'task',
+            source: 'clickup'
+          }
+        }));
+        
+        logger.info('ChatGPT search response', { query, count: results.length });
+        res.json({ results });
+      } else {
+        logger.warn('ChatGPT search returned no results', { query });
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('ChatGPT search error', { error: error?.message });
+      res.status(500).json({ 
+        error: 'Search failed',
+        message: error?.message || 'Internal server error'
+      });
+    }
+  });
+  
+  app.post('/chatgpt/search', async (req, res) => {
+    try {
+      const { query = '', limit = 10 } = req.body || {};
+      const q = query.toString();
+      const lim = Math.min(limit, 50);
+      
+      logger.info('ChatGPT search POST request', { query: q, limit: lim });
+      
+      const { handleSearch } = await import('./tools/search.js');
+      
+      if (!q.trim()) {
+        const { toolCatalog } = await import('./tools/catalog.js');
+        const results = toolCatalog.slice(0, lim).map((item: any) => ({
+          id: item.id,
+          title: item.title,
+          text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+          snippet: item.description,
+          url: item.url,
+          metadata: { 
+            name: item.name, 
+            category: 'tool',
+            source: 'tool_catalog'
+          }
+        }));
+        
+        logger.info('ChatGPT search POST response (empty query)', { count: results.length });
+        res.json({ results });
+        return;
+      }
+      
+      const searchResult = await handleSearch({ query: q, limit: lim });
+      
+      if ('results' in searchResult && Array.isArray(searchResult.results)) {
+        const results = searchResult.results.map((item: any) => ({
+          id: item.id || '',
+          title: item.title || '',
+          text: item.text || item.snippet || item.description || '',
+          snippet: item.snippet || item.description || '',
+          url: item.url || '',
+          metadata: {
+            status: item.status,
+            list: item.list,
+            category: item.category || 'task',
+            source: 'clickup'
+          }
+        }));
+        
+        logger.info('ChatGPT search POST response', { query: q, count: results.length });
+        res.json({ results });
+      } else {
+        logger.warn('ChatGPT search POST returned no results', { query: q });
+        res.json({ results: [] });
+      }
+    } catch (error: any) {
+      logger.error('ChatGPT search POST error', { error: error?.message });
+      res.status(500).json({ 
+        error: 'Search failed',
+        message: error?.message || 'Internal server error'
+      });
+    }
+  });
+  
+  app.get('/chatgpt/fetch', async (req, res) => {
+    try {
+      const id = (req.query.id as string) || '';
+      
+      if (!id) {
+        res.status(400).json({ 
+          error: 'Bad Request',
+          message: 'Missing required parameter: id' 
+        });
+        return;
+      }
+      
+      logger.info('ChatGPT fetch request', { id });
+      
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      
+      if ('id' in result && 'text' in result) {
+        const response = {
+          id: result.id,
+          content: result.text || '',
+          metadata: {
+            title: result.title || '',
+            url: result.url || '',
+            category: result.metadata?.category || 'document',
+            source: id.startsWith('tool:') ? 'tool_catalog' : 'clickup'
+          }
+        };
+        
+        logger.info('ChatGPT fetch response', { id, hasContent: !!response.content });
+        res.json(response);
+      } else {
+        logger.warn('ChatGPT fetch - document not found', { id });
+        res.status(404).json({ 
+          error: 'Not Found',
+          message: `Document with id '${id}' not found` 
+        });
+      }
+    } catch (error: any) {
+      logger.error('ChatGPT fetch error', { error: error?.message });
+      res.status(500).json({ 
+        error: 'Fetch failed',
+        message: error?.message || 'Internal server error'
+      });
+    }
+  });
+  
+  app.post('/chatgpt/fetch', async (req, res) => {
+    try {
+      const { id = '' } = req.body || {};
+      
+      if (!id) {
+        res.status(400).json({ 
+          error: 'Bad Request',
+          message: 'Missing required parameter: id' 
+        });
+        return;
+      }
+      
+      logger.info('ChatGPT fetch POST request', { id });
+      
+      const { handleFetch } = await import('./tools/fetch.js');
+      const result = await handleFetch({ id });
+      
+      if ('id' in result && 'text' in result) {
+        const response = {
+          id: result.id,
+          content: result.text || '',
+          metadata: {
+            title: result.title || '',
+            url: result.url || '',
+            category: result.metadata?.category || 'document',
+            source: id.startsWith('tool:') ? 'tool_catalog' : 'clickup'
+          }
+        };
+        
+        logger.info('ChatGPT fetch POST response', { id, hasContent: !!response.content });
+        res.json(response);
+      } else {
+        logger.warn('ChatGPT fetch POST - document not found', { id });
+        res.status(404).json({ 
+          error: 'Not Found',
+          message: `Document with id '${id}' not found` 
+        });
+      }
+    } catch (error: any) {
+      logger.error('ChatGPT fetch POST error', { error: error?.message });
+      res.status(500).json({ 
+        error: 'Fetch failed',
+        message: error?.message || 'Internal server error'
+      });
+    }
+  });
+  
+  // Health check for ChatGPT connector
+  app.get('/chatgpt/health', (_req, res) => {
+    res.json({
+      status: 'healthy',
+      service: 'ChatGPT Deep Research Connector',
+      version: '1.0.0',
+      endpoints: [
+        '/chatgpt/search',
+        '/chatgpt/fetch'
+      ],
+      timestamp: new Date().toISOString()
     });
   });
 

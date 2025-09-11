@@ -1,0 +1,3 @@
+event: message
+data: {"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"clickup-mcp-server","version":"0.8.5"}},"jsonrpc":"2.0","id":1}
+
