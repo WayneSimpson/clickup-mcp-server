@@ -89,6 +89,26 @@ export function startSSEServer() {
     }
   }));
 
+  // Global OPTIONS handler to satisfy browser preflight requests
+  // Responds 204 with permissive headers if CORS middleware is disabled
+  // NOTE: In Express 5 (path-to-regexp v6), using '*' as a path throws
+  // "Missing parameter name". Use a safe regex to match any path.
+  app.options(/.*/, (req, res) => {
+    // If CORS is enabled, let the cors middleware handle it by setting headers.
+    if (configuration.enableCors) {
+      res.sendStatus(204);
+      return;
+    }
+    // Minimal headers for browser preflight compatibility
+    const origin = (req.headers.origin as string) || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, mcp-session-id, Mcp-Session-Id');
+    res.setHeader('Access-Control-Max-Age', '600');
+    res.sendStatus(204);
+  });
+
   const transports = {
     streamable: {} as Record<string, StreamableHTTPServerTransport>,
     sse: {} as Record<string, SSEServerTransport>,
@@ -251,6 +271,12 @@ export function startSSEServer() {
 
   // Legacy SSE endpoints (for backwards compatibility)
   app.get('/sse', async (req, res) => {
+    // Ensure CORS headers are present for browser-based SSE clients
+    const origin = (req.headers.origin as string) || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+
     const transport = new SSEServerTransport('/messages', res);
     transports.sse[transport.sessionId] = transport;
 
@@ -268,6 +294,12 @@ export function startSSEServer() {
   });
 
   app.post('/messages', async (req, res) => {
+    // Ensure CORS headers for POST, especially when CORS middleware is disabled
+    const origin = (req.headers.origin as string) || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+
     const sessionId = req.query.sessionId as string;
     const transport = transports.sse[sessionId];
     if (transport) {
@@ -282,7 +314,9 @@ export function startSSEServer() {
   app.get('/search', async (req, res) => {
     try {
       const query = (req.query.q || req.query.query || '').toString();
-      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      const rawLimit = (req.query.limit as string) || (req.query.top_k as string) || (req.query.k as string) || (req.query.n as string) || '10';
+      const limit = Math.min(parseInt(rawLimit) || 10, 50);
+      logger.info('REST search GET', { query, limit });
       
       // Import search handler dynamically to avoid circular dependencies
       const { handleSearch } = await import('./tools/search.js');
@@ -304,10 +338,26 @@ export function startSSEServer() {
       }
       const result = await handleSearch({ query, limit });
       
-      // Check if result has the expected structure (success case)
-      if ('results' in result && Array.isArray(result.results)) {
+      // Normalize/augment items; avoid empty results when possible
+      let items: any[] = Array.isArray((result as any).results) ? (result as any).results : [];
+      if (items.length === 0) {
+        try {
+          const { toolCatalog } = await import('./tools/catalog.js');
+          items = toolCatalog.slice(0, limit).map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+            url: item.url,
+            snippet: item.description,
+            source_url: item.url,
+            metadata: { name: item.name, category: 'tool' }
+          }));
+        } catch {}
+      }
+      
+      if (items.length > 0) {
         const chatgptResponse = {
-          results: result.results.map((item: any) => ({
+          results: items.map((item: any) => ({
             id: item.id,
             title: item.title,
             // Provide both text and snippet for maximum compatibility
@@ -335,11 +385,12 @@ export function startSSEServer() {
 
   app.post('/search', async (req, res) => {
     try {
-      const { query = '', limit = 10 } = req.body || {};
-      
+      const { query = '', limit, top_k, k, n } = req.body || {};
+      const rawLimit = (limit ?? top_k ?? k ?? n ?? 10);
       const { handleSearch } = await import('./tools/search.js');
       const q = query.toString();
-      const lim = Math.min(limit, 50);
+      const lim = Math.min(parseInt(String(rawLimit)) || 10, 50);
+      logger.info('REST search POST', { query: q, limit: lim });
       if (!q.trim()) {
         const { toolCatalog } = await import('./tools/catalog.js');
         const items = toolCatalog.slice(0, lim).map((item: any) => ({
@@ -356,9 +407,24 @@ export function startSSEServer() {
       }
       const result = await handleSearch({ query: q, limit: lim });
       
-      if ('results' in result && Array.isArray(result.results)) {
+      let items: any[] = Array.isArray((result as any).results) ? (result as any).results : [];
+      if (items.length === 0) {
+        try {
+          const { toolCatalog } = await import('./tools/catalog.js');
+          items = toolCatalog.slice(0, lim).map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+            url: item.url,
+            snippet: item.description,
+            source_url: item.url,
+            metadata: { name: item.name, category: 'tool' }
+          }));
+        } catch {}
+      }
+      if (items.length > 0) {
         const chatgptResponse = {
-          results: result.results.map((item: any) => ({
+          results: items.map((item: any) => ({
             id: item.id,
             title: item.title,
             text: item.text || item.snippet || item.description || '',
@@ -450,7 +516,9 @@ export function startSSEServer() {
   app.get('/mcp/search', async (req, res) => {
     try {
       const query = (req.query.q || req.query.query || '').toString();
-      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      const rawLimit = (req.query.limit as string) || (req.query.top_k as string) || (req.query.k as string) || (req.query.n as string) || '10';
+      const limit = Math.min(parseInt(rawLimit) || 10, 50);
+      logger.info('REST /mcp/search GET', { query, limit });
       const { handleSearch } = await import('./tools/search.js');
       if (!query.trim()) {
         const { toolCatalog } = await import('./tools/catalog.js');
@@ -467,9 +535,24 @@ export function startSSEServer() {
         return;
       }
       const result = await handleSearch({ query, limit });
-      if ('results' in result && Array.isArray(result.results)) {
+      let items: any[] = Array.isArray((result as any).results) ? (result as any).results : [];
+      if (items.length === 0) {
+        try {
+          const { toolCatalog } = await import('./tools/catalog.js');
+          items = toolCatalog.slice(0, limit).map((item: any) => ({
+            id: item.id,
+            title: item.title,
+            text: `${item.title}\n\n${item.description}\n\nReference: ${item.url}`,
+            url: item.url,
+            snippet: item.description,
+            source_url: item.url,
+            metadata: { name: item.name, category: 'tool' }
+          }));
+        } catch {}
+      }
+      if (items.length > 0) {
         res.json({
-          results: result.results.map((item: any) => ({
+          results: items.map((item: any) => ({
             id: item.id,
             title: item.title,
             text: item.text || item.snippet || item.description || '',
@@ -490,9 +573,11 @@ export function startSSEServer() {
 
   app.post('/mcp/search', async (req, res) => {
     try {
-      const { query = '', limit = 10 } = req.body || {};
+      const { query = '', limit, top_k, k, n } = req.body || {};
+      const rawLimit = (limit ?? top_k ?? k ?? n ?? 10);
       const q = query.toString();
-      const lim = Math.min(limit, 50);
+      const lim = Math.min(parseInt(String(rawLimit)) || 10, 50);
+      logger.info('REST /mcp/search POST', { query: q, limit: lim });
       const { handleSearch } = await import('./tools/search.js');
       if (!q.trim()) {
         const { toolCatalog } = await import('./tools/catalog.js');
@@ -699,6 +784,10 @@ export function startSSEServer() {
   // ===== DEDICATED CHATGPT DEEP RESEARCH CONNECTOR ENDPOINTS =====
   // ChatGPT Custom Connectors expect plain REST, NOT MCP protocol
   // These endpoints are completely separate from MCP handlers
+  app.get('/chatgpt/health', (_req, res) => {
+    logger.info('ChatGPT health check');
+    res.json({ ok: true, service: 'clickup-mcp', timestamp: new Date().toISOString() });
+  });
   
   app.get('/chatgpt/search', async (req, res) => {
     try {

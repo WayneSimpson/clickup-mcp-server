@@ -8,7 +8,7 @@
  * writing logs to only the log file to avoid interfering with JSON-RPC.
  */
 
-import { createWriteStream } from 'fs';
+import { createWriteStream, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config, { LogLevel } from './config.js';
@@ -19,11 +19,46 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Current process ID for logging
 const pid = process.pid;
 
-// Create a write stream for logging - use a fixed filename in the build directory
-const logFileName = 'server.log';
-const logStream = createWriteStream(join(__dirname, logFileName), { flags: 'w' });
-// Write init message to log file only
-logStream.write(`Logging initialized to ${join(__dirname, logFileName)}\n`);
+// Prefer a writable path inside containers; fall back to module dir if provided via env
+const LOG_FILE_DIR = process.env.LOG_FILE_DIR || '/tmp/clickup-mcp';
+const LOG_FILE_NAME = process.env.LOG_FILE_NAME || 'server.log';
+const LOG_PATH = join(LOG_FILE_DIR, LOG_FILE_NAME);
+
+// Create directory if needed and set up a safe writer that falls back to stderr
+let logStream: ReturnType<typeof createWriteStream> | null = null;
+let fallbackToStderr = false;
+try {
+  // Ensure directory exists (no-op if already exists)
+  mkdirSync(LOG_FILE_DIR, { recursive: true });
+  logStream = createWriteStream(LOG_PATH, { flags: 'a' });
+  // If any stream error occurs, switch to stderr to avoid crashing
+  logStream.on('error', () => {
+    fallbackToStderr = true;
+  });
+} catch (_e) {
+  fallbackToStderr = true;
+}
+
+function writeLog(line: string) {
+  try {
+    if (!fallbackToStderr && logStream) {
+      logStream.write(line + '\n');
+      return;
+    }
+  } catch (_e) {
+    // Fall through to stderr
+  }
+  try {
+    // Last-resort logging that will not crash JSON-RPC stdio if used incorrectly
+    // but acceptable for HTTP/SSE mode; used only when file logging fails
+    process.stderr.write(line + '\n');
+  } catch (_e) {
+    // Swallow to avoid any crash due to logging
+  }
+}
+
+// Write init message to the selected sink
+writeLog(`Logging initialized to ${fallbackToStderr ? 'stderr' : LOG_PATH}`);
 
 // Use the configured log level from config.ts
 const configuredLevel = config.logLevel;
@@ -88,8 +123,8 @@ function log(level: 'trace' | 'debug' | 'info' | 'warn' | 'error', message: stri
     }
   }
 
-  // Write to file only, not to stderr which would interfere with JSON-RPC
-  logStream.write(logMessage + '\n');
+  // Always use the safe writer
+  writeLog(logMessage);
 }
 
 /**
@@ -182,7 +217,11 @@ export class Logger {
 // Handle SIGTERM for clean shutdown
 process.on('SIGTERM', () => {
   log('info', 'Received SIGTERM signal, shutting down...');
-  logStream.end(() => {
+  if (logStream && !fallbackToStderr) {
+    logStream.end(() => {
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
-  });
-}); 
+  }
+});

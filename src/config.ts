@@ -156,7 +156,11 @@ const configuration: Config = {
     'https://127.0.0.1:3443',
     'https://localhost:3443',
     'https://127.0.0.1:3231',
-    'https://localhost:3231'
+    'https://localhost:3231',
+    // ChatGPT web origins
+    'https://chatgpt.com',
+    'https://www.chatgpt.com',
+    'https://chat.openai.com'
   ]),
   rateLimitMax: parseInteger(process.env.RATE_LIMIT_MAX, 100),
   rateLimitWindowMs: parseInteger(process.env.RATE_LIMIT_WINDOW_MS, 60000),

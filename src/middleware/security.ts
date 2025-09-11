@@ -173,7 +173,14 @@ export function createCorsMiddleware() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'mcp-session-id', 'Mcp-Session-Id', 'Authorization'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'x-api-key',
+      'X-API-Key',
+      'mcp-session-id',
+      'Mcp-Session-Id'
+    ],
     exposedHeaders: ['mcp-session-id', 'Mcp-Session-Id']
   });
 }

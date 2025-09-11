@@ -36,7 +36,8 @@ export const fetchTool: Tool = {
       title: { type: 'string' },
       text: { type: 'string' },
       url: { type: 'string' },
-      metadata: { type: 'object', additionalProperties: true }
+      metadata: { type: 'object', additionalProperties: true },
+      raw: { type: 'object', additionalProperties: true }
     }
   }
 };
@@ -64,6 +65,7 @@ export async function handleFetch(params: any) {
         text,
         url: entry.url,
         metadata: { name: entry.name, category: 'tool' },
+        raw: entry,
         // Mirrors for other clients: JSON-encoded document in content
         content: sponsorService.createResponse({
           id: entry.id,
@@ -108,6 +110,7 @@ export async function handleFetch(params: any) {
       text,
       url,
       metadata,
+      raw: task,
       // Mirrors for other clients: JSON-encoded document in content
       content: sponsorService.createResponse({
         id: task.id,

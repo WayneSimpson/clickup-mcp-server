@@ -50,7 +50,7 @@ function toolCatalogMatches(tool: any, query: string): boolean {
 export const searchTool: Tool = {
   name: 'search',
   description:
-    'Universal retrieval: search the content store for relevant documents by keyword(s). Returns top-k object IDs for use with the fetch tool. Inputs: query (string, required), limit (number, default 10).',
+    'Universal retrieval: search the content store for relevant documents by keyword(s). Returns top-k object IDs for use with the fetch tool. Inputs: query (string, required), limit (integer, default 10).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -59,8 +59,11 @@ export const searchTool: Tool = {
         description: 'The search text to match against task names.'
       },
       limit: {
-        type: 'number',
-        description: 'Maximum number of results to return (default 10).'
+        type: 'integer',
+        minimum: 1,
+        maximum: 50,
+        default: 10,
+        description: 'Maximum number of results to return (default 10, max 50).'
       }
     },
     required: ['query']
@@ -68,6 +71,7 @@ export const searchTool: Tool = {
   outputSchema: {
     type: 'object',
     properties: {
+      ids: { type: 'array', items: { type: 'string' }, description: 'Top-k object identifiers (IDs) matching the query.' },
       objectIds: { type: 'array', items: { type: 'string' }, description: 'Top-k object identifiers (IDs) matching the query.' },
       results: {
         type: 'array',
@@ -87,7 +91,7 @@ export const searchTool: Tool = {
         description: 'Optional convenience payload with brief metadata for each objectId.'
       }
     },
-    required: ['objectIds']
+    required: ['ids']
   }
 };
 
@@ -98,7 +102,10 @@ export async function handleSearch(params: any) {
       : (params?.query ?? params?.search ?? params?.q ?? '');
     const query = String(queryVal).trim();
     const rawLimit = (params && typeof params === 'object' && 'limit' in params) ? (params as any).limit : 10;
-    const limit = Math.max(1, Math.min(Number(rawLimit ?? 10), 50));
+    const limit = Math.max(1, Math.min(parseInt(String(rawLimit ?? 10), 10), 50));
+
+    // Verbose logging for debugging ChatGPT connector behavior
+    logger.info('Search invoked', { query, limit });
     if (!query) {
       // Return tool catalog entries as a non-empty baseline for indexing
       const toolMatches = toolCatalog
@@ -108,6 +115,7 @@ export async function handleSearch(params: any) {
       lines.push(`No query provided. Showing tool catalog items (top ${toolMatches.length}).`);
       return {
         // Top-level expected by retrievable
+        ids: toolMatches.map(t => t.id),
         objectIds: toolMatches.map(t => t.id),
         results: toolMatches,
         // Mirrors for other clients
@@ -115,6 +123,7 @@ export async function handleSearch(params: any) {
           results: toolMatches.map((t) => ({ id: t.id, title: t.title, url: t.url }))
         }).content,
         structuredContent: {
+          ids: toolMatches.map(t => t.id),
           objectIds: toolMatches.map(t => t.id),
           results: toolMatches
         },
@@ -202,6 +211,7 @@ export async function handleSearch(params: any) {
 
       return {
         // Top-level (what ChatGPT retrievable expects)
+        ids: limitedIds,
         objectIds: limitedIds,
         results: limitedResults,
         // Mirrors for other clients
@@ -209,6 +219,7 @@ export async function handleSearch(params: any) {
           results: limitedResults.map((r) => ({ id: r.id, title: r.title, url: r.url || '' }))
         }).content,
         structuredContent: {
+          ids: limitedIds,
           objectIds: limitedIds,
           results: limitedResults
         },
@@ -242,8 +253,9 @@ export async function handleSearch(params: any) {
       objectIds.push(String(s.id));
     });
 
-    return {
+    const response = {
       // Top-level expected by retrievable
+      ids: objectIds,
       objectIds,
       results: structuredResults,
       // Mirrors for other clients
@@ -251,11 +263,14 @@ export async function handleSearch(params: any) {
         results: structuredResults.map((r) => ({ id: r.id, title: r.title, url: r.url || '' }))
       }).content,
       structuredContent: {
+        ids: objectIds,
         objectIds,
         results: structuredResults
       },
       toolResult: structuredResults
     };
+    logger.info('Search results prepared', { count: structuredResults.length });
+    return response;
   } catch (error: any) {
     logger.error('Search failed', { error: error?.message });
     const message = `Search failed: ${String(error?.message || error)}`;
@@ -266,8 +281,9 @@ export async function handleSearch(params: any) {
         .filter(t => toolCatalogMatches(t, searchQuery))
         .slice(0, 10)
         .map(t => ({ id: t.id, title: t.title, snippet: t.description, url: t.url }));
-      return {
+      const response = {
         // Top-level expected by retrievable
+        ids: toolMatches.map(t => t.id),
         objectIds: toolMatches.map(t => t.id),
         results: toolMatches,
         // Mirrors for other clients
@@ -275,19 +291,24 @@ export async function handleSearch(params: any) {
           results: toolMatches.map((t) => ({ id: t.id, title: t.title, url: t.url }))
         }).content,
         structuredContent: {
+          ids: toolMatches.map(t => t.id),
           objectIds: toolMatches.map(t => t.id),
           results: toolMatches
         },
         toolResult: toolMatches
       };
+      logger.info('Search fallback (tool catalog)', { count: toolMatches.length });
+      return response;
     }
     return {
       // Top-level expected by retrievable
+      ids: [],
       objectIds: [],
       results: [],
       // Mirrors for other clients
       content: sponsorService.createResponse({ results: [] }).content,
       structuredContent: {
+        ids: [],
         objectIds: [],
         results: []
       },
